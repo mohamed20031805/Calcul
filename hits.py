@@ -46,6 +46,12 @@ JOURS_NON_FIXES = [
 COL_UPDATE      = "Update Date"
 COL_INTEGRATION = "Integration Date"
 
+# Colonnes utilisées pour la Clé Unique (noms partiels acceptés)
+COL_FA_NAME    = "Fund administrator name"
+COL_AMOUNT     = "Amount in EUR"
+COL_FA_ACCOUNT = "FA Account Number"
+COL_OWNER      = "Account Owner"
+
 # ─────────────────────────────────────────────
 #  JOURS FÉRIÉS LUXEMBOURG
 # ─────────────────────────────────────────────
@@ -180,6 +186,34 @@ def clean_and_compute(df: pd.DataFrame) -> pd.DataFrame:
     # Parser les dates
     df[col_ud] = pd.to_datetime(df[col_ud], errors="coerce")
     df[col_ig] = pd.to_datetime(df[col_ig], errors="coerce")
+
+    # Clé Unique — IntegrationDate + FA Name + Amount EUR + FA Account + Owner
+    col_fa   = find_col(df, COL_FA_NAME)
+    col_amt  = find_col(df, COL_AMOUNT)
+    col_faacc= find_col(df, COL_FA_ACCOUNT)
+    col_own  = find_col(df, COL_OWNER)
+
+    def _safe(row, col):
+        return str(row[col]).strip() if col and pd.notna(row.get(col, None)) else ""
+
+    def build_key(row):
+        ig_str = row[col_ig].strftime("%Y/%m/%d %H:%M:%S") if pd.notna(row[col_ig]) else ""
+        return "|".join([
+            ig_str,
+            _safe(row, col_fa),
+            _safe(row, col_amt),
+            _safe(row, col_faacc),
+            _safe(row, col_own),
+        ])
+
+    df.insert(0, "Clé Unique", df.apply(build_key, axis=1))
+
+    # Vérification doublons
+    dupes = df["Clé Unique"].duplicated().sum()
+    if dupes:
+        print(f"  [AVERT] {dupes} clé(s) dupliquée(s) détectée(s)")
+    else:
+        print(f"  Clé Unique : OK — toutes les clés sont uniques")
 
     # diff_day (calendaire) — comparaison sur la date uniquement, heure ignorée
     df["diff_day"] = (df[col_ud].dt.normalize() - df[col_ig].dt.normalize()).dt.days
