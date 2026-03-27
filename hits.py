@@ -181,8 +181,8 @@ def clean_and_compute(df: pd.DataFrame) -> pd.DataFrame:
     df[col_ud] = pd.to_datetime(df[col_ud], errors="coerce")
     df[col_ig] = pd.to_datetime(df[col_ig], errors="coerce")
 
-    # diff_day (calendaire)
-    df["diff_day"] = (df[col_ud] - df[col_ig]).dt.days
+    # diff_day (calendaire) — comparaison sur la date uniquement, heure ignorée
+    df["diff_day"] = (df[col_ud].dt.normalize() - df[col_ig].dt.normalize()).dt.days
 
     # diff_off (jours ouvrés Luxembourg)
     feriers_cache = {}
