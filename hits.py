@@ -374,6 +374,11 @@ def build_team_stats(df: pd.DataFrame, nok_keys: set) -> dict:
     df = df[~((df["diff_day"].fillna(0) == 0) & (df["diff_off"].fillna(0) == 0))].copy()
     print(f"  Lignes supprimées (diff_day=0 ET diff_off=0) : {avant2 - len(df)}")
 
+    # Étape 2b — Garder uniquement les lignes où diff_off == diff_day
+    avant3 = len(df)
+    df = df[df["diff_off"].fillna(-1) == df["diff_day"].fillna(-2)].copy()
+    print(f"  Lignes supprimées (diff_off ≠ diff_day)      : {avant3 - len(df)}")
+
     # Étape 3 — Déduplication Clé Unique : garder statut ≠ To be treated en priorité
     if col_st and col_key:
         df["_is_open"] = df[col_st].astype(str).str.strip() == STATUS_OPEN
