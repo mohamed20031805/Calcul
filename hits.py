@@ -413,16 +413,14 @@ def build_team_stats(df: pd.DataFrame, nok_keys: set) -> dict:
         C       = len(df_team)
         moyenne = round(B / C, 2) if C else 0
 
-        nok_count = int(df_team[col_key].isin(nok_keys).sum()) if (col_key and nok_keys) else 0
-        pct_nok   = round(nok_count / A * 100, 2) if A else 0
+        pct_mvt = round(C / B * 100, 2) if B else 0
 
         result[team] = {
             "A":         A,
             "B":         B,
             "C":         C,
             "moyenne":   moyenne,
-            "nok":       nok_count,
-            "pct_nok":   pct_nok,
+            "pct_mvt":   pct_mvt,
             "df_detail": df_team,
         }
 
@@ -451,10 +449,9 @@ def write_team_sheet(wb, team: str, stats: dict):
         ("B",       "Total jours — SUM(diff_off) lignes filtrées",         stats["B"],       "0.00"),
         ("C",       "Nb lignes filtrées (diff_off=diff_day, ≠0)",          stats["C"],       None),
         ("Moyenne", "Moyenne jours (B / C)",                               stats["moyenne"], "0.00"),
-        ("NOK",     "Nb mvt NON Justifiés (Clé dans onglet NOK)",          stats["nok"],     None),
-        ("%NOK",    "% NOK  (NOK / A × 100)",                              stats["pct_nok"], "0.00%"),
+        ("%",       "% mouvements non justifiés  (C / B × 100)",           stats["pct_mvt"], "0.00%"),
     ]
-    bg_kpi = [BLUE_LIGHT, BLUE_XLIGHT, BLUE_XLIGHT, BLUE_LIGHT, RED_LIGHT, RED_LIGHT]
+    bg_kpi = [BLUE_LIGHT, BLUE_XLIGHT, BLUE_XLIGHT, BLUE_LIGHT, RED_LIGHT]
     r = 3
     ws.cell(row=r, column=1, value="Indicateur").font  = hdr(bold=True, color=WHITE)
     ws.cell(row=r, column=1).fill = fill(BLUE_MID)
@@ -545,7 +542,7 @@ def write_recap_global(wb, team_stats: dict):
     c.alignment = center()
     ws.row_dimensions[1].height = 30
 
-    headers = ["Équipe", "A — Clés uniques", "B — Total jours", "C — Nb lignes", "Moyenne (B/C)", "NOK", "% NOK (NOK/A)"]
+    headers = ["Équipe", "A — Clés uniques", "B — Total jours", "C — Nb lignes", "Moyenne (B/C)", "% Mvt non justifiés (C/B)"]
     bg_h    = [BLUE_MID]*6
     r = 3
     for ci, h in enumerate(headers, 1):
@@ -556,11 +553,11 @@ def write_recap_global(wb, team_stats: dict):
         cell.alignment = center()
     r += 1
 
-    tot_A = tot_B = tot_C = tot_nok = 0
+    tot_A = tot_B = tot_C = 0
     for i, (team, s) in enumerate(sorted(team_stats.items())):
         bg = GRAY_LIGHT if i % 2 == 0 else WHITE
-        vals = [team, s["A"], s["B"], s["C"], s["moyenne"], s["nok"], s["pct_nok"]]
-        fmts = [None, None, "0.00", None, "0.00", None, "0.00%"]
+        vals = [team, s["A"], s["B"], s["C"], s["moyenne"], s["pct_mvt"]]
+        fmts = [None, None, "0.00", None, "0.00", "0.00%"]
         for ci, (val, fmt) in enumerate(zip(vals, fmts), 1):
             cell = ws.cell(row=r, column=ci, value=val)
             cell.font      = Font(name="Arial", size=10)
@@ -569,16 +566,16 @@ def write_recap_global(wb, team_stats: dict):
             cell.alignment = Alignment(horizontal="left" if ci==1 else "center", vertical="center")
             if fmt:
                 cell.number_format = fmt
-            if ci in (6, 7) and isinstance(val, (int, float)) and val > 0:
+            if ci == 6 and isinstance(val, (int, float)) and val > 0:
                 cell.fill = fill(RED_LIGHT)
-        tot_A += s["A"]; tot_B += s["B"]; tot_C += s["C"]; tot_nok += s["nok"]
+        tot_A += s["A"]; tot_B += s["B"]; tot_C += s["C"]
         r += 1
 
     # Ligne TOTAL
     tot_moy  = round(tot_B / tot_C, 2) if tot_C else 0
-    tot_pct  = round(tot_nok / tot_A * 100, 2) if tot_A else 0
-    totals   = ["TOTAL", tot_A, tot_B, tot_C, tot_moy, tot_nok, tot_pct]
-    fmts_tot = [None, None, "0.00", None, "0.00", None, "0.00%"]
+    tot_pct  = round(tot_C / tot_B * 100, 2) if tot_B else 0
+    totals   = ["TOTAL", tot_A, tot_B, tot_C, tot_moy, tot_pct]
+    fmts_tot = [None, None, "0.00", None, "0.00", "0.00%"]
     for ci, (val, fmt) in enumerate(zip(totals, fmts_tot), 1):
         cell = ws.cell(row=r, column=ci, value=val)
         cell.font      = hdr(bold=True, color=WHITE, size=10)
@@ -588,7 +585,7 @@ def write_recap_global(wb, team_stats: dict):
         if fmt:
             cell.number_format = fmt
 
-    for col, w in [("A",25),("B",16),("C",16),("D",14),("E",14),("F",10),("G",14)]:
+    for col, w in [("A",25),("B",16),("C",16),("D",14),("E",14),("F",22)]:
         ws.column_dimensions[col].width = w
 
 # ─────────────────────────────────────────────
@@ -869,7 +866,7 @@ def main():
     nok_keys   = load_nok_keys(INPUT_FOLDER)
     team_stats = build_team_stats(df.copy(), nok_keys)
     for team, s in sorted(team_stats.items()):
-        print(f"    {team:<25s}  A={s['A']}  B={s['B']}  Moy={s['moyenne']}  C={s['C']}  %NOK={s['pct_nok']}%")
+        print(f"    {team:<25s}  A={s['A']}  B={s['B']}  Moy={s['moyenne']}  C={s['C']}  %NOK={s['pct_mvt']}%")
 
     print("\n[5] Export Excel")
     output_path = os.path.join(OUTPUT_FOLDER, f"HITS_rapport_{TRIMESTRE}.xlsx")
