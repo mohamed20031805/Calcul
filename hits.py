@@ -59,6 +59,10 @@ STATUS_OPEN        = "To be treated"   # statut = dossier ouvert (1 seul statut)
 # Date de fin de trimestre utilisée quand une clé n'a qu'1 statut (format YYYY-MM-DD)
 DATE_FIN_TRIMESTRE = "2025-03-31"
 
+# Colonne équipe et nom de l'onglet NOK dans les fichiers source
+COL_TEAM       = "Team In-Charge"   # nom partiel accepté
+NOK_SHEET_NAME = "NOK"              # nom exact de l'onglet NOK dans les fichiers source
+
 # ─────────────────────────────────────────────
 #  JOURS FÉRIÉS LUXEMBOURG
 # ─────────────────────────────────────────────
@@ -306,6 +310,255 @@ def compute_stats(series: pd.Series, label: str) -> dict:
         "pos":      int((s > 0).sum()),
     }
 
+
+# ─────────────────────────────────────────────
+#  STATISTIQUES PAR ÉQUIPE (Team In-Charge)
+# ─────────────────────────────────────────────
+
+def load_nok_keys(folder: str) -> set:
+    """Lit tous les onglets NOK des fichiers source et retourne les Clés Uniques NOK."""
+    patterns = [os.path.join(folder, "*.xlsx"), os.path.join(folder, "*.xls")]
+    files = []
+    for p in patterns:
+        files.extend(glob.glob(p))
+
+    nok_keys = set()
+    for f in files:
+        try:
+            xf = pd.ExcelFile(f)
+            # Chercher un onglet dont le nom contient NOK
+            nok_sheet = next((s for s in xf.sheet_names if NOK_SHEET_NAME.lower() in s.lower()), None)
+            if nok_sheet:
+                df_nok = pd.read_excel(f, sheet_name=nok_sheet, dtype=str)
+                col_key = next((c for c in df_nok.columns if "cl" in c.lower() and "unique" in c.lower()), None)
+                if col_key:
+                    nok_keys.update(df_nok[col_key].dropna().str.strip().tolist())
+        except Exception as e:
+            print(f"  [AVERT] Lecture NOK ignorée pour {os.path.basename(f)} : {e}")
+
+    print(f"  Clés NOK chargées depuis onglets '{NOK_SHEET_NAME}' : {len(nok_keys)}")
+    return nok_keys
+
+
+def build_team_stats(df: pd.DataFrame, nok_keys: set) -> dict:
+    """
+    Pour chaque Team In-Charge calcule A, B, Moyenne, C, %NOK.
+    Retourne un dict  {team_name: {A, B, moyenne, C, pct_nok, df_detail}}
+    """
+    col_team = find_col(df, COL_TEAM)
+    col_key  = find_col(df, "Clé Unique")
+    col_st   = find_col(df, COL_STATUS)
+
+    if not col_team:
+        print(f"  [AVERT] Colonne '{COL_TEAM}' introuvable — stats par équipe ignorées")
+        return {}
+
+    # Supprimer lignes où Team In-Charge est vide
+    avant = len(df)
+    df = df[df[col_team].notna() & (df[col_team].str.strip() != "")].copy()
+    print(f"  Lignes supprimées (Team In-Charge vide) : {avant - len(df)}")
+
+    # Pour A et C : garder 1 ligne par Clé Unique → ligne avec statut ≠ To be treated
+    # (si 2 statuts : on garde le 2e ; si 1 seul statut ouvert : on le garde quand même)
+    df_dedup = (
+        df.sort_values(col_st, key=lambda s: s == STATUS_OPEN)  # False (≠ open) avant True
+        .drop_duplicates(subset=[col_key], keep="first")
+        .copy()
+    )
+
+    result = {}
+    teams = sorted(df[col_team].dropna().unique())
+
+    for team in teams:
+        df_team_full  = df[df[col_team] == team].copy()          # toutes lignes (pour B)
+        df_team_dedup = df_dedup[df_dedup[col_team] == team].copy()  # 1 ligne/clé (pour A, C)
+
+        A       = len(df_team_dedup)
+        B       = int(df_team_full["diff_off"].fillna(0).sum())
+        moyenne = round(B / A, 2) if A else 0
+
+        # C = clés présentes dans l'onglet NOK
+        if col_key and nok_keys:
+            C = int(df_team_dedup[col_key].isin(nok_keys).sum())
+        else:
+            C = 0
+
+        pct_nok = round(C / A * 100, 2) if A else 0
+
+        result[team] = {
+            "A":        A,
+            "B":        B,
+            "moyenne":  moyenne,
+            "C":        C,
+            "pct_nok":  pct_nok,
+            "df_detail": df_team_full,
+        }
+
+    return result
+
+
+def write_team_sheet(wb, team: str, stats: dict):
+    """Crée une feuille Excel pour une équipe avec ses KPIs + données détail."""
+    # Nom de feuille Excel : max 31 chars, pas de caractères spéciaux
+    sheet_name = str(team)[:31].replace("/","_").replace("\\","_").replace("?","").replace("*","").replace("[","").replace("]","").replace(":","")
+    ws = wb.create_sheet(sheet_name)
+    ws.sheet_view.showGridLines = False
+
+    # ── Titre équipe
+    ws.merge_cells("A1:F1")
+    c = ws["A1"]
+    c.value     = f"Équipe : {team}  —  {TRIMESTRE}"
+    c.font      = hdr(bold=True, color=WHITE, size=13)
+    c.fill      = fill(BLUE_DARK)
+    c.alignment = center()
+    ws.row_dimensions[1].height = 28
+
+    # ── Bloc KPIs
+    kpis = [
+        ("A",         "Nombre de mvt analysés (clés uniques)",          stats["A"],       None),
+        ("B",         "Total Nombre de jours (somme diff_off)",          stats["B"],       None),
+        ("Moyenne",   "Moyenne Nombre de jours  (B / A)",                stats["moyenne"], "0.00"),
+        ("C",         "Nombre de mvt NON Justifiés (clés dans NOK)",     stats["C"],       None),
+        ("%",         "% mvt non justifiés  (C / A × 100)",              stats["pct_nok"], "0.00%"),
+    ]
+
+    bg_kpi = [BLUE_LIGHT, BLUE_XLIGHT, BLUE_LIGHT, RED_LIGHT, RED_LIGHT]
+    r = 3
+    ws.cell(row=r, column=1, value="Indicateur").font  = hdr(bold=True, color=WHITE)
+    ws.cell(row=r, column=1).fill = fill(BLUE_MID)
+    ws.cell(row=r, column=1).alignment = center()
+    ws.cell(row=r, column=2, value="Description").font = hdr(bold=True, color=WHITE)
+    ws.cell(row=r, column=2).fill = fill(BLUE_MID)
+    ws.cell(row=r, column=2).alignment = center()
+    ws.cell(row=r, column=3, value="Valeur").font      = hdr(bold=True, color=WHITE)
+    ws.cell(row=r, column=3).fill = fill(BLUE_MID)
+    ws.cell(row=r, column=3).alignment = center()
+    for col in range(1, 4):
+        ws.cell(row=r, column=col).border = border_thin()
+    r += 1
+
+    for i, (code, desc, val, fmt) in enumerate(kpis):
+        ws.cell(row=r, column=1, value=code).font      = Font(name="Arial", bold=True, size=11)
+        ws.cell(row=r, column=1).fill      = fill(bg_kpi[i])
+        ws.cell(row=r, column=1).alignment = center()
+        ws.cell(row=r, column=2, value=desc).font      = Font(name="Arial", size=10)
+        ws.cell(row=r, column=2).fill      = fill(bg_kpi[i])
+        ws.cell(row=r, column=2).alignment = Alignment(horizontal="left", vertical="center")
+        ws.cell(row=r, column=3, value=val).font       = Font(name="Arial", bold=True, size=11)
+        ws.cell(row=r, column=3).fill      = fill(bg_kpi[i])
+        ws.cell(row=r, column=3).alignment = center()
+        if fmt:
+            ws.cell(row=r, column=3).number_format = fmt
+        for col in range(1, 4):
+            ws.cell(row=r, column=col).border = border_thin()
+        r += 1
+
+    # ── Données détail
+    r += 1
+    ws.cell(row=r, column=1, value="Détail des mouvements").font = hdr(bold=True, color=WHITE, size=11)
+    ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=6)
+    ws.cell(row=r, column=1).fill      = fill(BLUE_MID)
+    ws.cell(row=r, column=1).alignment = center()
+    r += 1
+
+    df_det = stats["df_detail"]
+    det_cols = list(df_det.columns)
+
+    for ci, col in enumerate(det_cols, 1):
+        cell = ws.cell(row=r, column=ci, value=col)
+        cell.font      = hdr(bold=True, color=WHITE, size=9)
+        cell.fill      = fill(BLUE_DARK)
+        cell.border    = border_thin()
+        cell.alignment = center()
+    r += 1
+
+    for row_data in df_det.itertuples(index=False):
+        for ci, val in enumerate(row_data, 1):
+            cell = ws.cell(row=r, column=ci)
+            if isinstance(val, pd.Timestamp):
+                cell.value = val.to_pydatetime()
+                cell.number_format = "YYYY/MM/DD HH:MM:SS"
+            elif val is pd.NaT or (isinstance(val, float) and np.isnan(val)):
+                cell.value = ""
+            else:
+                cell.value = val
+            cell.font      = Font(name="Arial", size=9)
+            cell.border    = border_thin()
+            cell.alignment = Alignment(vertical="center")
+            if det_cols[ci-1] in ("diff_day", "diff_off") and isinstance(cell.value, (int, float)):
+                cell.fill = fill(GREEN_LIGHT if cell.value > 0 else (ORANGE_LIGHT if cell.value == 0 else RED_LIGHT))
+        r += 1
+
+    # Largeurs
+    ws.column_dimensions["A"].width = 8
+    ws.column_dimensions["B"].width = 40
+    ws.column_dimensions["C"].width = 12
+    for ci in range(1, len(det_cols)+1):
+        col_letter = get_column_letter(ci)
+        if ci > 3:
+            ws.column_dimensions[col_letter].width = 22
+    ws.freeze_panes = f"A{r - len(df_det)}"
+
+
+def write_recap_global(wb, team_stats: dict):
+    """Feuille récap globale toutes équipes."""
+    ws = wb.create_sheet("Récap Global", 0)   # en premier
+    ws.sheet_view.showGridLines = False
+
+    ws.merge_cells("A1:F1")
+    c = ws["A1"]
+    c.value     = f"Récapitulatif Global — {TRIMESTRE}"
+    c.font      = hdr(bold=True, color=WHITE, size=14)
+    c.fill      = fill(BLUE_DARK)
+    c.alignment = center()
+    ws.row_dimensions[1].height = 30
+
+    headers = ["Équipe", "A — Mvt analysés", "B — Total jours", "Moyenne jours", "C — NOK", "% NOK"]
+    bg_h    = [BLUE_MID]*6
+    r = 3
+    for ci, h in enumerate(headers, 1):
+        cell = ws.cell(row=r, column=ci, value=h)
+        cell.font      = hdr(bold=True, color=WHITE, size=10)
+        cell.fill      = fill(BLUE_MID)
+        cell.border    = border_thin()
+        cell.alignment = center()
+    r += 1
+
+    tot_A = tot_B = tot_C = 0
+    for i, (team, s) in enumerate(sorted(team_stats.items())):
+        bg = GRAY_LIGHT if i % 2 == 0 else WHITE
+        vals = [team, s["A"], s["B"], s["moyenne"], s["C"], s["pct_nok"]]
+        fmts = [None, None, None, "0.00", None, "0.00%"]
+        for ci, (val, fmt) in enumerate(zip(vals, fmts), 1):
+            cell = ws.cell(row=r, column=ci, value=val)
+            cell.font      = Font(name="Arial", size=10)
+            cell.fill      = fill(bg)
+            cell.border    = border_thin()
+            cell.alignment = Alignment(horizontal="left" if ci==1 else "center", vertical="center")
+            if fmt:
+                cell.number_format = fmt
+            if ci in (5, 6) and isinstance(val, (int, float)) and val > 0:
+                cell.fill = fill(RED_LIGHT)
+        tot_A += s["A"]; tot_B += s["B"]; tot_C += s["C"]
+        r += 1
+
+    # Ligne TOTAL
+    tot_moy  = round(tot_B / tot_A, 2) if tot_A else 0
+    tot_pct  = round(tot_C / tot_A * 100, 2) if tot_A else 0
+    totals   = ["TOTAL", tot_A, tot_B, tot_moy, tot_C, tot_pct]
+    fmts_tot = [None, None, None, "0.00", None, "0.00%"]
+    for ci, (val, fmt) in enumerate(zip(totals, fmts_tot), 1):
+        cell = ws.cell(row=r, column=ci, value=val)
+        cell.font      = hdr(bold=True, color=WHITE, size=10)
+        cell.fill      = fill(BLUE_DARK)
+        cell.border    = border_thin()
+        cell.alignment = Alignment(horizontal="left" if ci==1 else "center", vertical="center")
+        if fmt:
+            cell.number_format = fmt
+
+    for col, w in [("A",25),("B",18),("C",16),("D",14),("E",12),("F",12)]:
+        ws.column_dimensions[col].width = w
+
 # ─────────────────────────────────────────────
 #  EXPORT EXCEL
 # ─────────────────────────────────────────────
@@ -396,7 +649,7 @@ def write_stat_block(ws, start_row, start_col, stats: dict, title_bg=BLUE_MID):
     return r
 
 
-def create_excel_report(df: pd.DataFrame, stats_day: dict, stats_off: dict, output_path: str):
+def create_excel_report(df: pd.DataFrame, stats_day: dict, stats_off: dict, team_stats: dict, output_path: str):
     wb = Workbook()
 
     # ── Feuille 1 : Données ───────────────────────────────────────────────
@@ -539,6 +792,12 @@ def create_excel_report(df: pd.DataFrame, stats_day: dict, stats_off: dict, outp
         chart.set_categories(cats_ref)
         ws_chart.add_chart(chart, "D2")
 
+    # ── Feuilles par équipe ──────────────────────────────────────────────
+    if team_stats:
+        write_recap_global(wb, team_stats)
+        for team, s in sorted(team_stats.items()):
+            write_team_sheet(wb, team, s)
+
     # ── Sauvegarde ────────────────────────────────────────────────────────
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     wb.save(output_path)
@@ -574,9 +833,15 @@ def main():
         if k != "label":
             print(f"    {k:20s} {v}")
 
-    print("\n[4] Export Excel")
+    print("\n[4] Statistiques par équipe (Team In-Charge)")
+    nok_keys   = load_nok_keys(INPUT_FOLDER)
+    team_stats = build_team_stats(df.copy(), nok_keys)
+    for team, s in sorted(team_stats.items()):
+        print(f"    {team:<25s}  A={s['A']}  B={s['B']}  Moy={s['moyenne']}  C={s['C']}  %NOK={s['pct_nok']}%")
+
+    print("\n[5] Export Excel")
     output_path = os.path.join(OUTPUT_FOLDER, f"HITS_rapport_{TRIMESTRE}.xlsx")
-    create_excel_report(df, stats_day, stats_off, output_path)
+    create_excel_report(df, stats_day, stats_off, team_stats, output_path)
 
     print("\n✓ Terminé.\n")
 
