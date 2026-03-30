@@ -420,7 +420,7 @@ def build_team_stats(df: pd.DataFrame, nok_keys: set) -> dict:
             "B":         B,
             "C":         C,
             "moyenne":   moyenne,
-            "pct_mvt":   pct_mvt,
+            "pct_mvt":   pct_mvt / 100,
             "df_detail": df_team,
         }
 
