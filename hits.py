@@ -52,6 +52,13 @@ COL_AMOUNT     = "Amount in EUR"
 COL_FA_ACCOUNT = "FA Account Number"
 COL_OWNER      = "Account Owner"
 
+# Colonne statut et valeur du statut d'ouverture
+COL_STATUS         = "Status"          # nom partiel accepté
+STATUS_OPEN        = "To be treated"   # statut = dossier ouvert (1 seul statut)
+
+# Date de fin de trimestre utilisée quand une clé n'a qu'1 statut (format YYYY-MM-DD)
+DATE_FIN_TRIMESTRE = "2025-03-31"
+
 # ─────────────────────────────────────────────
 #  JOURS FÉRIÉS LUXEMBOURG
 # ─────────────────────────────────────────────
@@ -167,6 +174,39 @@ def load_and_fuse(folder: str) -> pd.DataFrame:
     return fused
 
 
+def appliquer_logique_statuts(df: pd.DataFrame, col_st: str, col_ud: str, date_fin: pd.Timestamp) -> pd.DataFrame:
+    """
+    Pour chaque Clé Unique :
+      - 1 statut  → dossier encore ouvert : Update Date remplacée par date_fin
+      - 2 statuts → on garde les 2 lignes telles quelles
+      - 3+ statuts → on supprime les lignes à partir du rang 3 (on garde rang 1 et 2)
+    Le rang est déterminé par l'ordre croissant de Update Date au sein de la clé.
+    """
+    avant = len(df)
+
+    # Trier par Clé Unique puis Update Date pour établir le rang
+    df = df.sort_values(["Clé Unique", col_ud]).copy()
+    df["_rang"] = df.groupby("Clé Unique").cumcount() + 1          # rang 1, 2, 3...
+    df["_nb_statuts"] = df.groupby("Clé Unique")["_rang"].transform("max")
+
+    # Logique 1 — clé avec 1 seul statut : remplacer Update Date par date fin trimestre
+    masque_1 = df["_nb_statuts"] == 1
+    df.loc[masque_1, col_ud] = date_fin
+    nb_ouverts = masque_1.sum()
+
+    # Logique 3 — clé avec 3+ statuts : supprimer les lignes de rang >= 3
+    masque_sup = df["_rang"] >= 3
+    nb_supprimes = masque_sup.sum()
+    df = df[~masque_sup].copy()
+
+    df.drop(columns=["_rang", "_nb_statuts"], inplace=True)
+
+    print(f"  Dossiers encore ouverts (1 statut) : {nb_ouverts} → Update Date remplacée par {date_fin.date()}")
+    print(f"  Lignes supprimées (rang 3+)         : {nb_supprimes}")
+    print(f"  Lignes après logique statuts        : {len(df)}")
+    return df
+
+
 def clean_and_compute(df: pd.DataFrame) -> pd.DataFrame:
     # Trouver les colonnes dates
     col_ud = find_col(df, COL_UPDATE)
@@ -214,6 +254,15 @@ def clean_and_compute(df: pd.DataFrame) -> pd.DataFrame:
         print(f"  [AVERT] {dupes} clé(s) dupliquée(s) détectée(s)")
     else:
         print(f"  Clé Unique : OK — toutes les clés sont uniques")
+
+    # ── Logique métier sur les statuts ────────────────────────────────────
+    col_st = find_col(df, COL_STATUS)
+    date_fin = pd.Timestamp(DATE_FIN_TRIMESTRE)
+
+    if col_st:
+        df = appliquer_logique_statuts(df, col_st, col_ud, date_fin)
+    else:
+        print(f"  [AVERT] Colonne statut '{COL_STATUS}' introuvable — logique statuts ignorée")
 
     # diff_day (calendaire) — comparaison sur la date uniquement, heure ignorée
     df["diff_day"] = (df[col_ud].dt.normalize() - df[col_ig].dt.normalize()).dt.days
