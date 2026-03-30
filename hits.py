@@ -344,16 +344,17 @@ def build_team_stats(df: pd.DataFrame, nok_keys: set) -> dict:
     """
     KPIs par Team In-Charge.
 
-    A = COUNT DISTINCT(Clé Unique) par Team  ← calculé AVANT tout filtre
-    Puis on filtre :
-      - Supprimer Team In-Charge vide
-      - Supprimer diff_day=0 ET diff_off=0
-      - Garder uniquement diff_off == diff_day
-    Sur les lignes filtrées :
+    A = COUNT DISTINCT(Clé Unique) par Team — calculé AVANT tout filtre
+    Puis filtres dans l'ordre :
+      1. Supprimer Team In-Charge vide
+      2. Supprimer lignes où diff_day = 0
+      3. Supprimer lignes où diff_off ≠ diff_day
+      4. Déduplication Clé Unique → garder statut ≠ To be treated
+    Sur les lignes restantes :
       B = SUM(diff_off) par Team
-      C = COUNT(lignes) par Team  (nb lignes ayant servi à B)
+      C = COUNT(lignes) par Team
       Moyenne = B / C
-      NOK = nb Clés Uniques dans onglet NOK
+      NOK = nb Clés dans onglet NOK
       %NOK = NOK / A × 100
     """
     col_team = find_col(df, COL_TEAM)
@@ -364,28 +365,42 @@ def build_team_stats(df: pd.DataFrame, nok_keys: set) -> dict:
         print(f"  [AVERT] Colonne '{COL_TEAM}' introuvable — stats par équipe ignorées")
         return {}
 
-    # ── Étape 1 : Supprimer Team In-Charge vide ───────────────────────────
+    # ── Étape 0 : Supprimer Team In-Charge vide ───────────────────────────
     avant = len(df)
     df = df[df[col_team].notna() & (df[col_team].astype(str).str.strip() != "")].copy()
-    print(f"  Lignes supprimées (Team In-Charge vide)      : {avant - len(df)}")
+    print(f"  Lignes supprimées (Team In-Charge vide)  : {avant - len(df)}")
 
     # ── A : COUNT DISTINCT Clé Unique par Team — AVANT filtres diff ───────
     a_by_team = (
         df.groupby(col_team)[col_key].nunique().to_dict()
         if col_key else {t: 0 for t in df[col_team].unique()}
     )
-    print(f"  A (clés uniques par team avant filtres)      : {dict(sorted(a_by_team.items()))}")
+    print(f"  A par équipe (avant filtres)             : {dict(sorted(a_by_team.items()))}")
 
-    # ── Étape 2 : Supprimer diff_day=0 ET diff_off=0 ─────────────────────
+    # ── Étape 1 : Supprimer lignes où diff_day = 0 ───────────────────────
+    avant1 = len(df)
+    df = df[df["diff_day"].fillna(0) != 0].copy()
+    print(f"  Lignes supprimées (diff_day = 0)         : {avant1 - len(df)}")
+
+    # ── Étape 2 : Supprimer lignes où diff_off ≠ diff_day ────────────────
     avant2 = len(df)
-    df = df[~((df["diff_day"].fillna(0) == 0) & (df["diff_off"].fillna(0) == 0))].copy()
-    print(f"  Lignes supprimées (diff_day=0 ET diff_off=0) : {avant2 - len(df)}")
-
-    # ── Étape 3 : Garder uniquement diff_off == diff_day ─────────────────
-    avant3 = len(df)
     df = df[df["diff_off"].fillna(-1) == df["diff_day"].fillna(-2)].copy()
-    print(f"  Lignes supprimées (diff_off ≠ diff_day)      : {avant3 - len(df)}")
-    print(f"  Lignes restantes pour B et C                 : {len(df)}")
+    print(f"  Lignes supprimées (diff_off ≠ diff_day)  : {avant2 - len(df)}")
+
+    # ── Étape 3 : Déduplication Clé Unique — garder statut ≠ To be treated
+    avant3 = len(df)
+    if col_st and col_key:
+        df["_is_open"] = df[col_st].astype(str).str.strip() == STATUS_OPEN
+        df = (
+            df.sort_values("_is_open")       # False (≠ open) en premier
+            .drop_duplicates(subset=[col_key], keep="first")
+            .drop(columns=["_is_open"])
+            .copy()
+        )
+    elif col_key:
+        df = df.drop_duplicates(subset=[col_key]).copy()
+    print(f"  Lignes supprimées (doublons Clé Unique)  : {avant3 - len(df)}")
+    print(f"  Lignes pour B et C                       : {len(df)}")
 
     result = {}
     teams = sorted(a_by_team.keys())
@@ -398,12 +413,8 @@ def build_team_stats(df: pd.DataFrame, nok_keys: set) -> dict:
         C       = len(df_team)
         moyenne = round(B / C, 2) if C else 0
 
-        if col_key and nok_keys:
-            nok_count = int(df_team[col_key].isin(nok_keys).sum()) if col_key else 0
-        else:
-            nok_count = 0
-
-        pct_nok = round(nok_count / A * 100, 2) if A else 0
+        nok_count = int(df_team[col_key].isin(nok_keys).sum()) if (col_key and nok_keys) else 0
+        pct_nok   = round(nok_count / A * 100, 2) if A else 0
 
         result[team] = {
             "A":         A,
