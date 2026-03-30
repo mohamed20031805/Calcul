@@ -342,8 +342,19 @@ def load_nok_keys(folder: str) -> set:
 
 def build_team_stats(df: pd.DataFrame, nok_keys: set) -> dict:
     """
-    Pour chaque Team In-Charge calcule A, B, Moyenne, C, %NOK.
-    Retourne un dict  {team_name: {A, B, moyenne, C, pct_nok, df_detail}}
+    Préparation et calcul des KPIs par Team In-Charge.
+
+    Étapes :
+      1. Supprimer lignes Team In-Charge vide
+      2. Supprimer lignes où diff_day=0 ET diff_off=0
+      3. Déduplication Clé Unique → garder statut ≠ To be treated
+         (si tous les statuts sont To be treated, on garde quand même la ligne)
+    KPIs par groupe Team :
+      A = somme diff_off
+      B = nombre de lignes (après dédup)
+      Moyenne = A / B
+      C = nb lignes dont Clé Unique dans onglet NOK
+      % = C / B × 100
     """
     col_team = find_col(df, COL_TEAM)
     col_key  = find_col(df, "Clé Unique")
@@ -353,45 +364,55 @@ def build_team_stats(df: pd.DataFrame, nok_keys: set) -> dict:
         print(f"  [AVERT] Colonne '{COL_TEAM}' introuvable — stats par équipe ignorées")
         return {}
 
-    # Supprimer lignes où Team In-Charge est vide
+    # Étape 1 — Supprimer lignes Team In-Charge vide
     avant = len(df)
-    df = df[df[col_team].notna() & (df[col_team].str.strip() != "")].copy()
-    print(f"  Lignes supprimées (Team In-Charge vide) : {avant - len(df)}")
+    df = df[df[col_team].notna() & (df[col_team].astype(str).str.strip() != "")].copy()
+    print(f"  Lignes supprimées (Team In-Charge vide)      : {avant - len(df)}")
 
-    # Pour A et C : garder 1 ligne par Clé Unique → ligne avec statut ≠ To be treated
-    # (si 2 statuts : on garde le 2e ; si 1 seul statut ouvert : on le garde quand même)
-    df_dedup = (
-        df.sort_values(col_st, key=lambda s: s == STATUS_OPEN)  # False (≠ open) avant True
-        .drop_duplicates(subset=[col_key], keep="first")
-        .copy()
-    )
+    # Étape 2 — Supprimer lignes où diff_day=0 ET diff_off=0
+    avant2 = len(df)
+    df = df[~((df["diff_day"].fillna(0) == 0) & (df["diff_off"].fillna(0) == 0))].copy()
+    print(f"  Lignes supprimées (diff_day=0 ET diff_off=0) : {avant2 - len(df)}")
+
+    # Étape 3 — Déduplication Clé Unique : garder statut ≠ To be treated en priorité
+    if col_st and col_key:
+        df["_is_open"] = df[col_st].astype(str).str.strip() == STATUS_OPEN
+        df_dedup = (
+            df.sort_values("_is_open")          # False (≠ open) en premier
+            .drop_duplicates(subset=[col_key], keep="first")
+            .drop(columns=["_is_open"])
+            .copy()
+        )
+        df = df.drop(columns=["_is_open"])
+    else:
+        df_dedup = df.drop_duplicates(subset=[col_key]).copy() if col_key else df.copy()
+
+    print(f"  Lignes après déduplication Clé Unique        : {len(df_dedup)}")
 
     result = {}
-    teams = sorted(df[col_team].dropna().unique())
+    teams = sorted(df_dedup[col_team].dropna().unique())
 
     for team in teams:
-        df_team_full  = df[df[col_team] == team].copy()          # toutes lignes (pour B)
-        df_team_dedup = df_dedup[df_dedup[col_team] == team].copy()  # 1 ligne/clé (pour A, C)
+        df_team = df_dedup[df_dedup[col_team] == team].copy()
 
-        A       = len(df_team_dedup)
-        B       = int(df_team_full["diff_off"].fillna(0).sum())
-        moyenne = round(B / A, 2) if A else 0
+        B       = len(df_team)
+        A       = round(float(df_team["diff_off"].fillna(0).sum()), 2)
+        moyenne = round(A / B, 2) if B else 0
 
-        # C = clés présentes dans l'onglet NOK
         if col_key and nok_keys:
-            C = int(df_team_dedup[col_key].isin(nok_keys).sum())
+            C = int(df_team[col_key].isin(nok_keys).sum())
         else:
             C = 0
 
-        pct_nok = round(C / A * 100, 2) if A else 0
+        pct_nok = round(C / B * 100, 2) if B else 0
 
         result[team] = {
-            "A":        A,
-            "B":        B,
-            "moyenne":  moyenne,
-            "C":        C,
-            "pct_nok":  pct_nok,
-            "df_detail": df_team_full,
+            "A":         A,
+            "B":         B,
+            "moyenne":   moyenne,
+            "C":         C,
+            "pct_nok":   pct_nok,
+            "df_detail": df_team,
         }
 
     return result
@@ -415,11 +436,11 @@ def write_team_sheet(wb, team: str, stats: dict):
 
     # ── Bloc KPIs
     kpis = [
-        ("A",         "Nombre de mvt analysés (clés uniques)",          stats["A"],       None),
-        ("B",         "Total Nombre de jours (somme diff_off)",          stats["B"],       None),
-        ("Moyenne",   "Moyenne Nombre de jours  (B / A)",                stats["moyenne"], "0.00"),
-        ("C",         "Nombre de mvt NON Justifiés (clés dans NOK)",     stats["C"],       None),
-        ("%",         "% mvt non justifiés  (C / A × 100)",              stats["pct_nok"], "0.00%"),
+        ("A",         "Somme diff_off — total jours ouvrés par équipe",  stats["A"],       "0.00"),
+        ("B",         "Nombre de mouvements (lignes après dédup)",        stats["B"],       None),
+        ("Moyenne",   "Moyenne Nombre de jours  (A / B)",                 stats["moyenne"], "0.00"),
+        ("C",         "Nombre de mvt NON Justifiés (clés dans NOK)",      stats["C"],       None),
+        ("%",         "% mvt non justifiés  (C / B × 100)",               stats["pct_nok"], "0.00%"),
     ]
 
     bg_kpi = [BLUE_LIGHT, BLUE_XLIGHT, BLUE_LIGHT, RED_LIGHT, RED_LIGHT]
@@ -513,7 +534,7 @@ def write_recap_global(wb, team_stats: dict):
     c.alignment = center()
     ws.row_dimensions[1].height = 30
 
-    headers = ["Équipe", "A — Mvt analysés", "B — Total jours", "Moyenne jours", "C — NOK", "% NOK"]
+    headers = ["Équipe", "A — Somme diff_off", "B — Nb mouvements", "Moyenne (A/B)", "C — NOK", "% NOK (C/B)"]
     bg_h    = [BLUE_MID]*6
     r = 3
     for ci, h in enumerate(headers, 1):
@@ -539,12 +560,12 @@ def write_recap_global(wb, team_stats: dict):
                 cell.number_format = fmt
             if ci in (5, 6) and isinstance(val, (int, float)) and val > 0:
                 cell.fill = fill(RED_LIGHT)
-        tot_A += s["A"]; tot_B += s["B"]; tot_C += s["C"]
+        tot_A += s["A"]; tot_B += s["B"]; tot_C += s["C"]  # A=somme diff_off, B=nb lignes
         r += 1
 
     # Ligne TOTAL
-    tot_moy  = round(tot_B / tot_A, 2) if tot_A else 0
-    tot_pct  = round(tot_C / tot_A * 100, 2) if tot_A else 0
+    tot_moy  = round(tot_A / tot_B, 2) if tot_B else 0
+    tot_pct  = round(tot_C / tot_B * 100, 2) if tot_B else 0
     totals   = ["TOTAL", tot_A, tot_B, tot_moy, tot_C, tot_pct]
     fmts_tot = [None, None, None, "0.00", None, "0.00%"]
     for ci, (val, fmt) in enumerate(zip(totals, fmts_tot), 1):
